@@ -1,14 +1,17 @@
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
+require('dotenv').config(); // Opsional: Untuk keamanan environment variables
+
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
-// TAMBAHKAN INI: Agar bisa baca data dari WWWForm Unity
 app.use(express.urlencoded({ extended: true }));
 
+// Konfigurasi Database
 const db = mysql.createConnection({
     host: process.env.MYSQLHOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || 'root',
@@ -19,13 +22,15 @@ const db = mysql.createConnection({
 
 db.connect((err) => {
     if (err) {
-        console.error('Gagal konek ke MySQL: ' + err.stack);
+        console.error('Koneksi MySQL Gagal: ' + err.stack);
         return;
     }
-    console.log('Terhubung ke MySQL Railway!');
+    console.log('Terhubung ke database!');
 });
 
-// ENDPOINT LOGIN (Yang tadi bikin kamu error 404)
+// --- API Endpoints ---
+
+// Login
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const query = 'SELECT * FROM profiles WHERE username = ? AND password = ?';
@@ -40,12 +45,10 @@ app.post('/login', (req, res) => {
     });
 });
 
-// ENDPOINT UPDATE PROFILE
+// Update Profile
 app.post('/update-profile', (req, res) => {
     const { username, avatar_url } = req.body;
-    
-    // Gunakan UPDATE saja kalau user sudah login
-    const query = `UPDATE profiles SET avatar_url = ? WHERE username = ?`;
+    const query = 'UPDATE profiles SET avatar_url = ? WHERE username = ?';
 
     db.query(query, [avatar_url, username], (err, result) => {
         if (err) return res.status(500).send("ERROR");
@@ -53,13 +56,16 @@ app.post('/update-profile', (req, res) => {
     });
 });
 
+// Leaderboard
 app.get('/leaderboard', (req, res) => {
-    db.query('SELECT username, score, avatar_url FROM profiles ORDER BY score DESC LIMIT 10', (err, results) => {
-        if (err) return res.status(500).send(err);
-        res.send(results);
+    const query = 'SELECT username, score, avatar_url FROM profiles ORDER BY score DESC LIMIT 10';
+    db.query(query, (err, results) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(results);
     });
 });
 
+// Menjalankan Server
 app.listen(port, () => {
-    console.log(`Server API jalan di port ${port}`);
+    console.log(`Server aktif di port ${port}`);
 });

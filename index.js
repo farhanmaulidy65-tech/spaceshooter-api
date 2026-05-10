@@ -6,10 +6,12 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 8080; 
 
+// 1. Middleware Optimization
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
+// 2. Database Connection Pool with Error Handling
 const pool = mysql.createPool({
     host: process.env.MYSQLHOST,
     user: process.env.MYSQLUSER,
@@ -17,34 +19,46 @@ const pool = mysql.createPool({
     database: process.env.MYSQL_DATABASE, 
     port: process.env.MYSQLPORT || 3306,
     waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+    connectionLimit: 15, // Ditingkatkan sedikit untuk traffic leaderboard
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
 });
 
-const initDB = () => {
+// Helper untuk eksekusi query dengan Promise agar lebih rapi (Opsional)
+const dbQuery = (sql, params) => {
+    return new Promise((resolve, reject) => {
+        pool.query(sql, params, (err, results) => {
+            if (err) reject(err);
+            else resolve(results);
+        });
+    });
+};
+
+const initDB = async () => {
     const tableQuery = `
         CREATE TABLE IF NOT EXISTS profiles (
             id INT AUTO_INCREMENT PRIMARY KEY,
             username VARCHAR(255) NOT NULL UNIQUE,
             password VARCHAR(255) NOT NULL,
             score INT DEFAULT 0,
-            avatar_url LONGTEXT
+            avatar_url LONGTEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB;
     `;
     
-    pool.query(tableQuery, (err) => {
-        if (err) {
-            console.error("Database Error (Create Table):", err.message);
-        } else {
-            console.log("Database Sync: OK (Tabel Profiles Siap)");
-        }
-    });
+    try {
+        await dbQuery(tableQuery);
+        console.log(" Database Sync: OK (Tabel Profiles Siap)");
+    } catch (err) {
+        console.error(" Database Error (Create Table):", err.message);
+    }
 };
 
 initDB();
 
 // --- API LOGIN & AUTO-REGISTER ---
-app.post('/login', (req, res) => {
+app.post('/login', async (req, res) => {
     const { username, password, avatar_url } = req.body;
     
     const cleanUsername = username ? username.trim() : null;
@@ -55,64 +69,82 @@ app.post('/login', (req, res) => {
         return res.status(400).send("INPUT_EMPTY");
     }
 
-    pool.query('SELECT * FROM profiles WHERE username = ?', [cleanUsername], (err, results) => {
-        if (err) return res.status(500).send("DB_ERROR");
+    try {
+        const results = await dbQuery('SELECT * FROM profiles WHERE username = ?', [cleanUsername]);
 
         if (results.length > 0) {
+            // Login Logic
             if (results[0].password === cleanPassword) {
                 if (finalAvatar !== 'none') {
-                    pool.query('UPDATE profiles SET avatar_url = ? WHERE username = ?', [finalAvatar, cleanUsername]);
+                    await dbQuery('UPDATE profiles SET avatar_url = ? WHERE username = ?', [finalAvatar, cleanUsername]);
                 }
                 return res.status(200).send("success");
             } else {
                 return res.status(401).send("WRONG_PASSWORD");
             }
         } else {
-            pool.query('INSERT INTO profiles (username, password, score, avatar_url) VALUES (?, ?, 0, ?)', 
-            [cleanUsername, cleanPassword, finalAvatar], (insErr) => {
-                if (insErr) return res.status(500).send("REG_FAILED");
-                return res.status(200).send("success");
-            });
+            // Register Logic
+            await dbQuery('INSERT INTO profiles (username, password, score, avatar_url) VALUES (?, ?, 0, ?)', 
+            [cleanUsername, cleanPassword, finalAvatar]);
+            return res.status(200).send("success");
         }
-    });
+    } catch (err) {
+        console.error("Auth Error:", err);
+        res.status(500).send("DB_ERROR");
+    }
 });
 
-// --- API UPDATE SCORE (PENTING: SOLUSI ERROR 404) ---
-// Rute ini yang sebelumnya hilang sehingga Unity memberikan error 404
-app.post('/profiles', (req, res) => {
+// --- API UPDATE SCORE ---
+app.post('/profiles', async (req, res) => {
     const { username, score } = req.body;
     
     if (!username) return res.status(400).send("USERNAME_MISSING");
 
-    // Menggunakan UPDATE agar skor pada user yang sama diperbarui, bukan buat baris baru
-    const updateQuery = 'UPDATE profiles SET score = ? WHERE username = ?';
-    
-    pool.query(updateQuery, [score, username], (err, result) => {
-        if (err) {
-            console.error("Update Score Error:", err);
-            return res.status(500).send("UPDATE_FAILED");
-        }
+    try {
+        // Optimasi: Hanya update jika skor baru lebih tinggi (Highscore System)
+        // Jika ingin selalu update skor terakhir, hapus bagian "AND score < ?"
+        const updateQuery = 'UPDATE profiles SET score = ? WHERE username = ? AND score < ?';
+        const result = await dbQuery(updateQuery, [score, username, score]);
         
         if (result.affectedRows === 0) {
-            return res.status(404).send("USER_NOT_FOUND");
+            // Cek apakah user ada atau memang skor baru tidak lebih tinggi
+            const userCheck = await dbQuery('SELECT score FROM profiles WHERE username = ?', [username]);
+            if (userCheck.length === 0) return res.status(404).send("USER_NOT_FOUND");
+            return res.status(200).send("score_not_higher");
         }
 
-        console.log(`[Server] Skor berhasil diperbarui untuk ${username}: ${score}`);
+        console.log(`[Server] Highscore baru untuk ${username}: ${score}`);
         res.status(200).send("score_updated");
-    });
+    } catch (err) {
+        console.error("Update Score Error:", err);
+        res.status(500).send("UPDATE_FAILED");
+    }
+});
+
+// --- API GET LEADERBOARD (TOP 3) ---
+app.get('/get-leaderboard', async (req, res) => {
+    try {
+        const query = 'SELECT username, score, avatar_url FROM profiles ORDER BY score DESC LIMIT 3';
+        const results = await dbQuery(query);
+        res.status(200).json(results);
+    } catch (err) {
+        console.error("Leaderboard Error:", err);
+        res.status(500).send("ERROR");
+    }
 });
 
 // --- API GET PROFILE ---
-app.get('/get-profile/:username', (req, res) => {
+app.get('/get-profile/:username', async (req, res) => {
     const { username } = req.params;
-    pool.query('SELECT avatar_url, score FROM profiles WHERE username = ?', [username], (err, results) => {
-        if (err || results.length === 0) {
-            return res.status(404).send("NOT_FOUND");
-        }
+    try {
+        const results = await dbQuery('SELECT avatar_url, score FROM profiles WHERE username = ?', [username]);
+        if (results.length === 0) return res.status(404).send("NOT_FOUND");
         res.json(results[0]);
-    });
+    } catch (err) {
+        res.status(500).send("DB_ERROR");
+    }
 });
 
 app.listen(port, "0.0.0.0", () => {
-    console.log(`Server aktif di port ${port}`);
+    console.log(`✅ Server aktif di port ${port}`);
 });

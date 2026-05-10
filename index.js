@@ -6,17 +6,17 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 8080; 
 
+// --- KONFIGURASI DATABASE (DIPERKETAT) ---
 const pool = mysql.createPool({
     host: process.env.MYSQLHOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || 'root',
     password: process.env.MYSQLPASSWORD || 'XMHEdTUDkVuiyWfGZripxsBAQUhtuWgT',
     database: process.env.MYSQLDATABASE || 'railway',
     port: process.env.MYSQLPORT || 3306,
-    waitForConnections: true,
-    connectionLimit: 10
+    connectTimeout: 20000 // Tambah timeout agar tidak gampang 500
 });
 
-// AUTO-FIX DATABASE STRUCTURE
+// --- AUTO-FIX DATABASE ---
 const initDB = () => {
     const tableQuery = `
         CREATE TABLE IF NOT EXISTS profiles (
@@ -28,46 +28,56 @@ const initDB = () => {
         ) ENGINE=InnoDB;
     `;
     pool.query(tableQuery, (err) => {
-        if (!err) {
-            // Memastikan kolom tambahan ada jika tabel sudah lama dibuat
-            pool.query("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS password VARCHAR(255) DEFAULT '123'", () => {});
-            pool.query("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT 'none'", () => {});
-        }
+        if (err) console.error("Database Error:", err.message);
+        else console.log("Database Sync: OK");
     });
 };
 initDB();
 
-app.use(cors());
+app.use(cors()); // Mengizinkan Unity mengakses API
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// --- API LOGIN ---
 app.post('/login', (req, res) => {
     const { username } = req.body;
     if (!username) return res.status(400).send("USERNAME_EMPTY");
 
-    pool.query('SELECT * FROM profiles WHERE username = ?', [username.trim()], (err, results) => {
-        if (err) return res.status(500).send("DB_ERROR");
+    const cleanUser = username.trim();
+
+    pool.query('SELECT * FROM profiles WHERE username = ?', [cleanUser], (err, results) => {
+        if (err) {
+            console.error("Login Query Error:", err);
+            return res.status(500).send("DB_ERROR");
+        }
 
         if (results.length > 0) {
-            res.status(200).send("success");
+            return res.status(200).send("success");
         } else {
-            // Auto-Register jika user baru
-            pool.query('INSERT INTO profiles (username) VALUES (?)', [username.trim()], (insErr) => {
-                if (insErr) return res.status(500).send("REG_ERROR");
-                res.status(201).send("success");
+            pool.query('INSERT INTO profiles (username) VALUES (?)', [cleanUser], (insErr) => {
+                if (insErr) {
+                    console.error("Register Error:", insErr);
+                    return res.status(500).send("REG_FAILED");
+                }
+                return res.status(200).send("success");
             });
         }
     });
 });
 
+// --- API UPDATE SCORE & AVATAR ---
 app.post('/update-score', (req, res) => {
     const { username, score, avatar_url } = req.body;
-    if (avatar_url) pool.query('UPDATE profiles SET avatar_url = ? WHERE username = ?', [avatar_url, username]);
+    if (!username) return res.status(400).send("MISSING_USER");
+
+    if (avatar_url) {
+        pool.query('UPDATE profiles SET avatar_url = ? WHERE username = ?', [avatar_url, username]);
+    }
     if (score) {
         const nScore = parseInt(score);
         pool.query('UPDATE profiles SET score = ? WHERE username = ? AND ? > score', [nScore, username, nScore]);
     }
-    res.send("success");
+    res.status(200).send("success");
 });
 
-app.listen(port, () => console.log(`Server Aktif!`));
+app.listen(port, "0.0.0.0", () => console.log(`Server jalan di port ${port}`));

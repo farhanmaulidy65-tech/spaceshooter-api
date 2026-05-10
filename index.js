@@ -4,7 +4,6 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-// Railway menggunakan port 8080 secara internal, port 3000 tetap aman sebagai fallback
 const port = process.env.PORT || 8080; 
 
 // --- 1. Konfigurasi Database (Connection Pool) ---
@@ -19,9 +18,9 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// --- 2. Database Auto-Initializer (PENTING) ---
-// Fungsi ini memastikan tabel selalu ada dan memiliki struktur yang benar (id auto-increment)
+// --- 2. Database Auto-Initializer (Self-Healing) ---
 const initializeDatabase = () => {
+    // Memastikan tabel ada dengan ID yang otomatis bertambah (Auto-Increment)
     const createTableQuery = `
         CREATE TABLE IF NOT EXISTS profiles (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -36,12 +35,11 @@ const initializeDatabase = () => {
         if (err) {
             console.error('CRITICAL: Gagal inisialisasi tabel ->', err.message);
         } else {
-            console.log('SUCCESS: Tabel "profiles" siap (Auto-Increment Aktif)');
+            console.log('SUCCESS: Database & Tabel "profiles" Siap (Auto-Increment Aktif)');
         }
     });
 };
 
-// Jalankan inisialisasi saat startup
 initializeDatabase();
 
 // --- 3. Middleware ---
@@ -51,10 +49,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // --- 4. API Endpoints ---
 
-/**
- * LOGIN & AUTO-REGISTER
- * Menggunakan logic profesional: Jika tidak ada, buat. Jika ada, sukses.
- */
+// LOGIN & AUTO-REGISTER
 app.post('/login', (req, res) => {
     const { username } = req.body;
     
@@ -62,86 +57,52 @@ app.post('/login', (req, res) => {
         return res.status(400).send("USERNAME_EMPTY");
     }
 
-    const checkUser = 'SELECT * FROM profiles WHERE username = ?';
-    
-    pool.query(checkUser, [username.trim()], (err, results) => {
-        if (err) {
-            console.error("[Login Error]:", err.message);
-            return res.status(500).send("DB_ERROR");
-        }
+    const cleanUsername = username.trim();
+
+    pool.query('SELECT * FROM profiles WHERE username = ?', [cleanUsername], (err, results) => {
+        if (err) return res.status(500).send("DB_ERROR");
 
         if (results.length > 0) {
             res.status(200).send("success");
         } else {
-            // Auto-Register: id tidak dimasukkan karena sudah AUTO_INCREMENT di DB
-            const createUser = 'INSERT INTO profiles (username, password, score, avatar_url) VALUES (?, ?, 0, ?)';
-            pool.query(createUser, [username.trim(), '123', 'none'], (insErr) => {
-                if (insErr) {
-                    console.error("[Register Error]:", insErr.message);
-                    return res.status(500).send("REGISTER_FAILED");
-                }
+            // Register otomatis: id tidak dikirim agar diisi otomatis oleh MySQL
+            const createUser = 'INSERT INTO profiles (username, password, score, avatar_url) VALUES (?, "123", 0, "none")';
+            pool.query(createUser, [cleanUsername], (insErr) => {
+                if (insErr) return res.status(500).send("REGISTER_FAILED");
                 res.status(201).send("success");
             });
         }
     });
 });
 
-/**
- * GET PROFILE DATA
- */
-app.get('/get-profile/:username', (req, res) => {
-    const { username } = req.params;
-    const query = 'SELECT username, avatar_url, score FROM profiles WHERE username = ?';
-
-    pool.query(query, [username], (err, results) => {
-        if (err) return res.status(500).json({ error: "DB_ERROR" });
-        if (results.length > 0) {
-            res.json(results[0]);
-        } else {
-            res.status(404).json({ error: "USER_NOT_FOUND" });
-        }
-    });
-});
-
-/**
- * UPDATE SCORE (HIGHSCORE ONLY)
- */
+// UPDATE SCORE (Highscore Logic)
 app.post('/update-score', (req, res) => {
     const { username, score } = req.body;
     const newScore = parseInt(score);
 
     if (isNaN(newScore)) return res.status(400).send("INVALID_SCORE");
 
-    // Hanya update jika skor baru > skor di database
+    // Hanya update jika skor baru lebih tinggi dari skor lama
     const query = 'UPDATE profiles SET score = ? WHERE username = ? AND ? > score';
-
-    pool.query(query, [newScore, username, newScore], (err, result) => {
-        if (err) {
-            console.error("[UpdateScore Error]:", err.message);
-            return res.status(500).send("ERROR");
-        }
+    pool.query(query, [newScore, username, newScore], (err) => {
+        if (err) return res.status(500).send("ERROR");
         res.send("success");
     });
 });
 
-/**
- * LEADERBOARD
- */
+// LEADERBOARD (Top 10)
 app.get('/leaderboard', (req, res) => {
     const query = 'SELECT username, score, avatar_url FROM profiles ORDER BY score DESC LIMIT 10';
-    
     pool.query(query, (err, results) => {
         if (err) return res.status(500).json({ error: "FETCH_FAILED" });
         res.json(results);
     });
 });
 
-// --- 5. Health Check & Server Start ---
-app.get('/', (req, res) => res.send("SpaceShooter API is Online. Ready to fly!"));
+app.get('/', (req, res) => res.send("SpaceShooter API Online!"));
 
 app.listen(port, () => {
     console.log(`==========================================`);
     console.log(` Server Engine Aktif di Port: ${port}`);
-    console.log(` Database: ${process.env.MYSQLDATABASE || 'railway'}`);
     console.log(`==========================================`);
 });
